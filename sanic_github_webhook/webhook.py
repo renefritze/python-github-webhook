@@ -4,8 +4,8 @@ import hmac
 import logging
 
 import six
-from flask import abort, request
-
+from sanic.exceptions import abort
+from sanic.response import text
 
 class Webhook(object):
     """
@@ -17,8 +17,7 @@ class Webhook(object):
     """
 
     def __init__(self, app, endpoint='/postreceive', secret=None):
-        app.add_url_rule(rule=endpoint, endpoint=endpoint, view_func=self._postreceive,
-                         methods=['POST'])
+        app.add_route(uri=endpoint, handler=self._postreceive, methods=['POST'])
 
         self._hooks = collections.defaultdict(list)
         self._logger = logging.getLogger('webhook')
@@ -40,19 +39,19 @@ class Webhook(object):
 
         return decorator
 
-    def _get_digest(self):
+    def _get_digest(self, request):
         """Return message digest if a secret key was provided"""
 
         return hmac.new(
-            self._secret, request.data, hashlib.sha1).hexdigest() if self._secret else None
+            self._secret, request.body, hashlib.sha1).hexdigest() if self._secret else None
 
-    def _postreceive(self):
+    def _postreceive(self, request):
         """Callback from Flask"""
 
-        digest = self._get_digest()
+        digest = self._get_digest(request)
 
         if digest is not None:
-            sig_parts = _get_header('X-Hub-Signature').split('=', 1)
+            sig_parts = _get_header('X-Hub-Signature', request).split('=', 1)
             if not isinstance(digest, six.text_type):
                 digest = six.text_type(digest)
 
@@ -60,21 +59,21 @@ class Webhook(object):
                     or not hmac.compare_digest(sig_parts[1], digest)):
                 abort(400, 'Invalid signature')
 
-        event_type = _get_header('X-Github-Event')
-        data = request.get_json()
+        event_type = _get_header('X-Github-Event', request)
+        data = request.json
 
         if data is None:
             abort(400, 'Request body must contain json')
 
         self._logger.info(
-            '%s (%s)', _format_event(event_type, data), _get_header('X-Github-Delivery'))
+            '%s (%s)', _format_event(event_type, data), _get_header('X-Github-Delivery', request))
 
         for hook in self._hooks.get(event_type, []):
             hook(data)
 
-        return '', 204
+        return text('', 204)
 
-def _get_header(key):
+def _get_header(key, request):
     """Return message header"""
 
     try:
