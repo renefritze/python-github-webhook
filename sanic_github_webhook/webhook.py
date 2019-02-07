@@ -1,4 +1,5 @@
 import collections
+import datetime
 import hashlib
 import hmac
 import logging
@@ -7,7 +8,7 @@ import six
 from sanic.exceptions import abort
 from sanic.response import text
 
-class Webhook(object):
+class BaseWebhook(object):
     """
     Construct a webhook on the given :code:`app`.
 
@@ -28,7 +29,7 @@ class Webhook(object):
     def hook(self, event_type='push'):
         """
         Registers a function as a hook. Multiple hooks can be registered for a given type, but the
-        order in which they are invoke is unspecified.
+        order in which they are invoked is unspecified.
 
         :param event_type: The event type this hook will be invoked for.
         """
@@ -48,6 +49,39 @@ class Webhook(object):
     def _postreceive(self, request):
         """Callback from Flask"""
 
+        self._check_security(request)
+        event_type = _get_header(self._event_header, request)
+        data = request.json
+
+        if data is None:
+            abort(400, 'Request body must contain json')
+
+        delivery = _get_header('X-Github-Delivery', request, default=str(datetime.datetime.now()))
+        self._logger.info('%s (%s)', _format_event(event_type, data), delivery)
+
+        for hook in self._hooks.get(event_type, []):
+            hook(data)
+
+        return text('', 204)
+
+
+def _get_header(key, request, default=None):
+    """Return message header"""
+    try:
+        return request.headers[key]
+    except KeyError:
+        if default:
+            return default
+        abort(400, 'Missing header: ' + key)
+
+
+class GitHubWebhook(BaseWebhook):
+    _event_header = 'X-Github-Event'
+
+    def __init__(self, app, endpoint=None, secret=None):
+        super(GitHubWebhook, self).__init__(app, endpoint or 'github', secret)
+
+    def _check_security(self, request):
         digest = self._get_digest(request)
 
         if digest is not None:
@@ -59,29 +93,23 @@ class Webhook(object):
                     or not hmac.compare_digest(sig_parts[1], digest)):
                 abort(400, 'Invalid signature')
 
-        event_type = _get_header('X-Github-Event', request)
-        data = request.json
 
-        if data is None:
-            abort(400, 'Request body must contain json')
+class GitLabWebhook(BaseWebhook):
+    _event_header = 'X-Gitlab-Event'
 
-        self._logger.info(
-            '%s (%s)', _format_event(event_type, data), _get_header('X-Github-Delivery', request))
+    def __init__(self, app, endpoint=None, secret=None):
+        super(GitLabWebhook, self).__init__(app, endpoint or 'gitlab', secret)
 
-        for hook in self._hooks.get(event_type, []):
-            hook(data)
+    def _check_security(self, request):
+        try:
+            secret = request.headers['X-Gitlab-Token']
+        except KeyError:
+            return
+        if secret != self._secret:
+            abort(403, "invalid secret")
 
-        return text('', 204)
 
-def _get_header(key, request):
-    """Return message header"""
-
-    try:
-        return request.headers[key]
-    except KeyError:
-        abort(400, 'Missing header: ' + key)
-
-EVENT_DESCRIPTIONS = {
+GITHUB_EVENT_DESCRIPTIONS = {
     'commit_comment': '{comment[user][login]} commented on '
                       '{comment[commit_id]} in {repository[full_name]}',
     'create': '{sender[login]} created {ref_type} ({ref}) in '
@@ -127,11 +155,20 @@ EVENT_DESCRIPTIONS = {
              '{repository[full_name]}'
 }
 
+GITLAB_EVENT_DESCRIPTIONS = {
+    'Push Hook': '{user_name} updated {ref}',
+    'Pipeline Hook': 'Pipeline {object_attributes[id]}: {object_attributes[status]}',
+}
+
+
 def _format_event(event_type, data):
     try:
-        return EVENT_DESCRIPTIONS[event_type].format(**data)
+        return GITHUB_EVENT_DESCRIPTIONS[event_type].format(**data)
     except KeyError:
-        return event_type
+        try:
+            return GITLAB_EVENT_DESCRIPTIONS[event_type].format(**data)
+        except KeyError:
+            return event_type
 
 # -----------------------------------------------------------------------------
 # Copyright 2015 Bloomberg Finance L.P.

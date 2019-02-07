@@ -8,7 +8,7 @@
     :license: Apache License, Version 2.0
 """
 
-from sanic_github_webhook.webhook import Webhook
+from sanic_github_webhook.webhook import GitHubWebhook, GitLabWebhook
 
 # -----------------------------------------------------------------------------
 # Copyright 2015 Bloomberg Finance L.P.
